@@ -7,6 +7,7 @@
 <meta name="theme-color" content="#0a2540">
 <title>Controle Combustível & Hora Extra</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
@@ -350,8 +351,58 @@ var downloadsApi=null;
 var modoCompartilhado=false;
 var unsubMeses=null;
 
-// ─── Modo local (reserva): usado quando este arquivo é aberto fora do link
-// compartilhado. Os dados ficam salvos só neste aparelho/navegador. ───
+// ═══ SUPABASE (banco de dados compartilhado) ═══
+// Preencha com os dados do SEU projeto Supabase:
+// Project Settings → API → "Project URL" e "anon public" key.
+// A anon key é uma chave pública (protegida pelas regras de RLS do banco),
+// não é uma senha — pode ficar exposta no código do site sem problema.
+var SUPABASE_URL='https://wjriarpzqcrimrjracto.supabase.co';
+var SUPABASE_ANON_KEY='sb_publishable__fyvaHyN3k_d2j8-VDrXsg_iDRCdi-W';
+
+// Camada de compatibilidade: expõe o Supabase com a MESMA "forma" de API que
+// o resto do código já espera (collection(...).onSnapshot / .doc(id).set / .delete),
+// para não precisar reescrever salvar()/confirmarExclusao()/importarBackup().
+function criarDbApiSupabase(client){
+  function linhaParaEntry(row){
+    return{mes:row.mes,ano:row.ano,litros:Number(row.litros),valComb:Number(row.val_comb),heEx:Number(row.he_ex)};
+  }
+  return{
+    collection:function(nome){
+      return{
+        onSnapshot:function(cb,errCb){
+          function buscarTudo(){
+            client.from(nome).select('*').order('ano').order('mes').then(function(res){
+              if(res.error){if(errCb)errCb(res.error);return;}
+              var docs=res.data.map(function(row){
+                return{id:row.id,data:function(){return linhaParaEntry(row);}};
+              });
+              cb({docs:docs});
+            },function(err){if(errCb)errCb(err);});
+          }
+          buscarTudo();
+          var canal=client.channel('realtime:'+nome)
+            .on('postgres_changes',{event:'*',schema:'public',table:nome},buscarTudo)
+            .subscribe();
+          return function(){client.removeChannel(canal);};
+        },
+        doc:function(id){
+          return{
+            set:function(entry){
+              var linha={id:id,mes:entry.mes,ano:entry.ano,litros:entry.litros,val_comb:entry.valComb,he_ex:entry.heEx,updated_at:new Date().toISOString()};
+              return client.from(nome).upsert(linha).then(function(res){if(res.error)throw res.error;});
+            },
+            delete:function(){
+              return client.from(nome).delete().eq('id',id).then(function(res){if(res.error)throw res.error;});
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
+// ─── Modo local (reserva): usado só se o Supabase não estiver configurado ou
+// não conseguir conectar. Os dados ficam salvos só neste aparelho/navegador. ───
 function carregarDadosLocal(){
   var chaves=['comb_v2','comb_v2_backup'];
   for(var i=0;i<chaves.length;i++){
@@ -433,11 +484,11 @@ function renderAbaAtiva(){
 // se não estiver disponível (arquivo aberto avulso, fora do link), cai no modo local ───
 (async function iniciar(){
   try{
-    if(window.claude&&window.claude.use){
-      dbApi=await window.claude.use('db');
-      downloadsApi=await window.claude.use('downloads');
+    if(window.supabase&&SUPABASE_URL&&SUPABASE_ANON_KEY&&SUPABASE_URL.indexOf('COLE_AQUI')!==0){
+      var supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+      dbApi=criarDbApiSupabase(supabaseClient);
     }
-  }catch(e){dbApi=null;}
+  }catch(e){console.error('Erro ao iniciar Supabase:',e);dbApi=null;}
 
   if(dbApi){
     modoCompartilhado=true;
